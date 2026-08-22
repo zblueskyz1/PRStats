@@ -62,6 +62,30 @@ for (const k of ['host', 'user', 'password']) {
   }
 }
 
+// ---------- parsing ----------
+function parseOrExplain(text) {
+  const clean = text.replace(/^\uFEFF/, '').trim();     // strip any byte-order mark
+  if (!clean) throw new Error('EMPTY_FILE: the mod created the file but wrote nothing to it');
+  try {
+    return JSON.parse(clean);
+  } catch (e) {
+    // The most common real cause is the mod appending instead of overwriting,
+    // which leaves several JSON objects end to end. Recover the last one.
+    const last = clean.lastIndexOf('{"');
+    if (last > 0) {
+      try {
+        const obj = JSON.parse(clean.slice(last));
+        log('note: file contains multiple JSON objects — using the last one');
+        return obj;
+      } catch (e2) { /* fall through to the report below */ }
+    }
+    const err = new Error('BAD_JSON: ' + e.message);
+    err.sample = clean.length + ' bytes. Starts: ' + JSON.stringify(clean.slice(0, 180)) +
+                 ' Ends: ' + JSON.stringify(clean.slice(-120));
+    throw err;
+  }
+}
+
 // ---------- fetch over SFTP (Indifferent Broccoli and most panels) ----------
 async function pullSftp() {
   if (!SftpClient) throw new Error("ssh2-sftp-client not installed — run: npm install");
@@ -73,7 +97,7 @@ async function pullSftp() {
       readyTimeout: 20000,
     });
     const buf = await sftp.get(CFG.remote);
-    return JSON.parse(buf.toString('utf8'));
+    return parseOrExplain(buf.toString('utf8'));
   } finally {
     try { await sftp.end(); } catch (e) {}
   }
@@ -93,7 +117,7 @@ async function pullFtp() {
     await client.downloadTo(tmp, CFG.remote);
     const raw = fs.readFileSync(tmp, 'utf8');
     fs.unlinkSync(tmp);
-    return JSON.parse(raw);            // throws if the mod was mid-write
+    return parseOrExplain(raw);
   } finally {
     client.close();
   }
@@ -151,8 +175,10 @@ async function tick() {
   } catch (err) {
     fails++;
     const msg = String(err.message || err);
-    if (msg.includes('JSON')) {
-      log('caught the file mid-write, will retry');       // harmless, happens rarely
+    if (msg.startsWith('EMPTY_FILE') || msg.startsWith('BAD_JSON')) {
+      log('FAILED: ' + msg);
+      if (err.sample) log('  content was: ' + err.sample);
+      log('  -> check pr_stats.json in your file manager');
     } else if (fails === 1 || fails % 10 === 0) {
       log(`FAILED (${fails}x): ${msg}`);
       if (msg.includes('530') || msg.includes('authentication') || msg.includes('All configured authentication methods failed'))
@@ -174,7 +200,18 @@ async function tick() {
 // GitHub Actions schedule uses it, so nothing needs to stay running.
 if (process.env.RUN_ONCE === 'true') {
   log('single run — ' + CFG.protocol + '://' + CFG.host + CFG.remote);
-  tick().then(function () { process.exit(fails ? 1 : 0); });
+  (async function () {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await tick();
+      if (!fails) break;                       // got it
+      if (attempt < 3) {
+        log('retrying in 8s...');
+        await new Promise(r => setTimeout(r, 8000));
+        fails = 0;
+      }
+    }
+    process.exit(fails ? 1 : 0);
+  })();
 } else {
   log('bridge starting — ' + CFG.protocol + '://' + CFG.host + ':' + CFG.port + CFG.remote);
   log('publishing via ' + CFG.mode + ', every ' + (CFG.everyMs / 1000) + 's');
