@@ -1,0 +1,17 @@
+{
+  "name": "pr-stats-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pulls Project Realism server stats over FTP and publishes them for the website",
+  "main": "pr-bridge-ftp.js",
+  "scripts": {
+    "start": "node pr-bridge-ftp.js"
+  },
+  "dependencies": {
+    "basic-ftp": "^5.0.5",
+    "ssh2-sftp-client": "^10.0.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
